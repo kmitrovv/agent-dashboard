@@ -1,65 +1,341 @@
-import Image from "next/image";
+"use client";
+import { useState, useCallback, useEffect } from "react";
+import { Agent, AgentType, AGENT_META } from "@/lib/types";
+import { AgentCard } from "@/components/AgentCard";
+import { NewAgentModal } from "@/components/NewAgentModal";
+import { ProjectSelector, addRecentProject } from "@/components/ProjectSelector";
+import { useAgentStream } from "@/lib/useAgentStream";
+import { Plus, LayoutGrid, Columns, Cpu, Trash2 } from "lucide-react";
 
-export default function Home() {
+let counter = 0;
+type Layout = "grid" | "focus";
+
+export default function Dashboard() {
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showModal, setShowModal] = useState(false);
+  const [layout, setLayout] = useState<Layout>("grid");
+  const [project, setProject] = useState<string>("");
+
+  // Restore project from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem("agent-dashboard:project");
+    if (saved) setProject(saved);
+  }, []);
+
+  const handleProjectChange = useCallback((path: string) => {
+    setProject(path);
+    localStorage.setItem("agent-dashboard:project", path);
+    addRecentProject(path);
+  }, []);
+
+  const updateAgent = useCallback((id: string, updater: (a: Agent) => Agent) => {
+    setAgents((prev) => prev.map((a) => (a.id === id ? updater(a) : a)));
+  }, []);
+
+  const { startStream } = useAgentStream(updateAgent);
+
+  const spawnAgent = useCallback(
+    (type: AgentType, prompt: string) => {
+      counter++;
+      const id = `agent-${counter}-${Date.now()}`;
+      const agent: Agent = {
+        id,
+        name: `${AGENT_META[type].label} #${counter}`,
+        type,
+        prompt,
+        cwd: project || process.env.HOME || "/",
+        status: "queued",
+        blocks: [],
+        startedAt: Date.now(),
+      };
+      setAgents((prev) => [...prev, agent]);
+      setSelectedId(id);
+      setTimeout(() => startStream(agent), 0);
+    },
+    [startStream, project]
+  );
+
+  const removeAgent = useCallback((id: string) => {
+    setAgents((prev) => prev.filter((a) => a.id !== id));
+    setSelectedId((prev) => (prev === id ? null : prev));
+  }, []);
+
+  const runningCount = agents.filter((a) => a.status === "running").length;
+  const doneCount = agents.filter((a) => a.status === "done").length;
+  const selectedAgent = agents.find((a) => a.id === selectedId) ?? null;
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="flex flex-col h-screen" style={{ background: "#08080f", color: "#e0e0ff" }}>
+      {/* Header */}
+      <header
+        className="flex items-center gap-3 px-4 py-2.5 flex-shrink-0"
+        style={{ borderBottom: "1px solid #1a1a30", background: "#0a0a14" }}
+      >
+        {/* Brand */}
+        <div className="flex items-center gap-2 mr-1 flex-shrink-0">
+          <Cpu size={16} style={{ color: "#6644ff" }} />
+          <span className="font-bold text-sm tracking-wide" style={{ color: "#e0e0ff" }}>
+            Agents
+          </span>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        {/* Project selector */}
+        <ProjectSelector value={project} onChange={handleProjectChange} />
+
+        {/* Live stats */}
+        <div className="flex items-center gap-3 text-xs font-mono ml-1" style={{ color: "#404068" }}>
+          {runningCount > 0 && (
+            <span className="flex items-center gap-1.5" style={{ color: "#00cc88" }}>
+              <span className="relative flex h-1.5 w-1.5">
+                <span
+                  className="absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"
+                  style={{ animation: "ping 1.2s cubic-bezier(0,0,0.2,1) infinite" }}
+                />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-green-400" />
+              </span>
+              {runningCount} running
+            </span>
+          )}
+          {doneCount > 0 && <span style={{ color: "#4466aa" }}>{doneCount} done</span>}
+          {agents.length > 0 && <span>{agents.length} total</span>}
         </div>
+
+        <div className="flex-1" />
+
+        {/* Layout toggle */}
+        <div className="flex rounded-lg overflow-hidden" style={{ border: "1px solid #1e1e35" }}>
+          {(["grid", "focus"] as Layout[]).map((l) => (
+            <button
+              key={l}
+              onClick={() => setLayout(l)}
+              className="p-1.5 transition-colors"
+              title={l === "grid" ? "Grid view" : "Focus view"}
+              style={{
+                background: layout === l ? "#1e1e35" : "transparent",
+                color: layout === l ? "#c0c0e8" : "#404060",
+              }}
+            >
+              {l === "grid" ? <LayoutGrid size={14} /> : <Columns size={14} />}
+            </button>
+          ))}
+        </div>
+
+        {agents.length > 0 && (
+          <button
+            onClick={() => { setAgents([]); setSelectedId(null); }}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-colors"
+            style={{ color: "#505070", border: "1px solid #1e1e35" }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.color = "#ff6688";
+              (e.currentTarget as HTMLButtonElement).style.borderColor = "#ff446640";
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.color = "#505070";
+              (e.currentTarget as HTMLButtonElement).style.borderColor = "#1e1e35";
+            }}
+          >
+            <Trash2 size={12} />
+            Clear
+          </button>
+        )}
+
+        <button
+          onClick={() => setShowModal(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-semibold transition-all"
+          style={{
+            background: "linear-gradient(135deg, #5533ff, #8844ff)",
+            color: "#fff",
+            boxShadow: "0 0 16px rgba(85,51,255,0.35)",
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 24px rgba(85,51,255,0.55)";
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 16px rgba(85,51,255,0.35)";
+          }}
+        >
+          <Plus size={14} />
+          New Agent
+        </button>
+      </header>
+
+      {/* Main */}
+      <main className="flex-1 overflow-hidden">
+        {agents.length === 0 ? (
+          <EmptyState onNew={() => setShowModal(true)} hasProject={!!project} />
+        ) : layout === "grid" ? (
+          <GridView agents={agents} selectedId={selectedId} onSelect={setSelectedId} onRemove={removeAgent} />
+        ) : (
+          <FocusView agents={agents} selectedId={selectedId} selectedAgent={selectedAgent} onSelect={setSelectedId} onRemove={removeAgent} />
+        )}
       </main>
+
+      {showModal && (
+        <NewAgentModal
+          onSubmit={spawnAgent}
+          onClose={() => setShowModal(false)}
+          hasProject={!!project}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ─── Grid View ─────────────────────────────────────────────── */
+function GridView({ agents, selectedId, onSelect, onRemove }: {
+  agents: Agent[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  const cols =
+    agents.length === 1 ? "grid-cols-1" :
+    agents.length === 2 ? "grid-cols-2" :
+    agents.length <= 4 ? "grid-cols-2" :
+    "grid-cols-3";
+
+  return (
+    <div className={`grid ${cols} gap-3 p-3 h-full overflow-auto`}
+      style={{ gridAutoRows: agents.length <= 2 ? "1fr" : "minmax(280px, 1fr)" }}>
+      {agents.map((agent) => (
+        <AgentCard
+          key={agent.id}
+          agent={agent}
+          isSelected={agent.id === selectedId}
+          onClick={() => onSelect(agent.id)}
+          onRemove={onRemove}
+        />
+      ))}
+    </div>
+  );
+}
+
+/* ─── Focus View ─────────────────────────────────────────────── */
+function FocusView({ agents, selectedId, selectedAgent, onSelect, onRemove }: {
+  agents: Agent[];
+  selectedId: string | null;
+  selectedAgent: Agent | null;
+  onSelect: (id: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <div className="flex h-full">
+      <div
+        className="w-56 flex-shrink-0 overflow-y-auto p-2 space-y-1"
+        style={{ borderRight: "1px solid #1a1a30" }}
+      >
+        {agents.map((agent) => {
+          const meta = AGENT_META[agent.type];
+          const selected = agent.id === selectedId;
+          const statusColor =
+            agent.status === "running" ? "#00ff88" :
+            agent.status === "done" ? "#4488ff" :
+            agent.status === "error" ? "#ff4466" : "#404060";
+
+          return (
+            <button
+              key={agent.id}
+              onClick={() => onSelect(agent.id)}
+              className="w-full text-left rounded-lg px-2.5 py-2 transition-all"
+              style={{
+                background: selected ? `${meta.color}15` : "transparent",
+                border: `1px solid ${selected ? meta.color + "35" : "transparent"}`,
+              }}
+              onMouseEnter={(e) => { if (!selected) (e.currentTarget as HTMLButtonElement).style.background = "#12121e"; }}
+              onMouseLeave={(e) => { if (!selected) (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+            >
+              <div className="flex items-center gap-2 mb-0.5">
+                <span className="text-sm leading-none">{meta.emoji}</span>
+                <span className="text-xs font-semibold" style={{ color: selected ? meta.color : "#8080b0" }}>
+                  {meta.label}
+                </span>
+                <span
+                  className="ml-auto w-1.5 h-1.5 rounded-full flex-shrink-0"
+                  style={{ background: statusColor }}
+                />
+              </div>
+              <p className="text-xs truncate" style={{ color: "#404060" }}>
+                {agent.prompt}
+              </p>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="flex-1 p-3 overflow-hidden">
+        {selectedAgent ? (
+          <AgentCard
+            agent={selectedAgent}
+            isSelected={true}
+            onClick={() => {}}
+            onRemove={onRemove}
+          />
+        ) : (
+          <div className="flex items-center justify-center h-full">
+            <p className="text-sm" style={{ color: "#25255a" }}>Select an agent</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Empty State ─────────────────────────────────────────────── */
+function EmptyState({ onNew, hasProject }: { onNew: () => void; hasProject: boolean }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full gap-5 p-8">
+      <div
+        className="w-16 h-16 rounded-2xl flex items-center justify-center"
+        style={{ background: "#0e0e20", border: "1px solid #2a2a48" }}
+      >
+        <Cpu size={30} style={{ color: "#5533ff" }} />
+      </div>
+
+      <div className="text-center max-w-xs">
+        <h2 className="text-base font-bold mb-1.5" style={{ color: "#c0c0e8" }}>
+          {hasProject ? "Ready to launch" : "Set a project first"}
+        </h2>
+        <p className="text-sm leading-relaxed" style={{ color: "#404068" }}>
+          {hasProject
+            ? "Spawn agents in parallel. Each one can read files, run code, and work in your project."
+            : "Pick a project folder using the selector above, then launch agents that work inside it."}
+        </p>
+      </div>
+
+      {hasProject && (
+        <div className="grid grid-cols-3 gap-2">
+          {(Object.keys(AGENT_META) as AgentType[]).map((type) => {
+            const meta = AGENT_META[type];
+            return (
+              <div
+                key={type}
+                className="flex flex-col items-center gap-1 p-2.5 rounded-xl text-center"
+                style={{ background: "#0e0e1a", border: "1px solid #1e1e35" }}
+              >
+                <span className="text-lg">{meta.emoji}</span>
+                <span className="text-xs font-medium" style={{ color: meta.color }}>{meta.label}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <button
+        onClick={onNew}
+        className="flex items-center gap-2 px-4 py-2 rounded-xl font-semibold text-sm"
+        style={{
+          background: hasProject ? "linear-gradient(135deg, #5533ff, #8844ff)" : "#13131f",
+          color: hasProject ? "#fff" : "#404060",
+          boxShadow: hasProject ? "0 0 20px rgba(85,51,255,0.4)" : "none",
+          border: hasProject ? "none" : "1px solid #1e1e35",
+          cursor: hasProject ? "pointer" : "not-allowed",
+        }}
+        disabled={!hasProject}
+      >
+        <Plus size={14} />
+        Launch First Agent
+      </button>
     </div>
   );
 }
