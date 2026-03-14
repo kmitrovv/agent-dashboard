@@ -322,57 +322,70 @@ export function SessionsDrawer({ open, onClose, currentProject, onResume }: Prop
         {/* Session detail panel */}
         {selected && (
           <div
-            className="flex flex-col h-full flex-1 agent-enter"
+            className="flex flex-col h-full flex-1 min-w-0 agent-enter"
             style={{ background: "#0e0e1a", borderLeft: "1px solid #1e1e35" }}
           >
             {/* Detail header */}
             <div
-              className="flex items-start gap-3 px-4 py-3 flex-shrink-0"
+              className="flex flex-col gap-2 px-4 py-3 flex-shrink-0"
               style={{ borderBottom: "1px solid #1e1e35" }}
             >
-              <span className="text-xl leading-none mt-0.5">{agentMeta?.emoji ?? "💬"}</span>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium leading-snug" style={{ color: "#c0c0e8" }}>
+              {/* Title row */}
+              <div className="flex items-start gap-2 w-full overflow-hidden">
+                <span className="text-xl leading-none mt-0.5 flex-shrink-0">{agentMeta?.emoji ?? "💬"}</span>
+                <p
+                  className="text-sm font-medium leading-snug flex-1 min-w-0"
+                  style={{
+                    color: "#c0c0e8",
+                    display: "-webkit-box",
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: "vertical",
+                    overflow: "hidden",
+                    overflowWrap: "anywhere",
+                  }}
+                >
                   {selected.firstPrompt || selected.summary || "Session"}
                 </p>
-                <div className="flex items-center gap-2 mt-1 flex-wrap">
-                  {agentMeta && (
-                    <span className="text-xs font-semibold" style={{ color: agentMeta.color }}>
-                      {agentMeta.label}
-                    </span>
-                  )}
-                  <span className="text-xs font-mono" style={{ color: "#35355a" }}>
-                    {new Date(selected.createdAt).toLocaleString()}
-                  </span>
-                  <span className="text-xs font-mono" style={{ color: "#252545" }}>
-                    {selected.sessionId.slice(0, 8)}…
-                  </span>
-                </div>
-                <div className="flex items-center gap-1 mt-0.5">
-                  <FolderOpen size={10} style={{ color: "#252545" }} />
-                  <span className="text-xs font-mono truncate" style={{ color: "#35355a" }}>
-                    {selected.cwd}
-                  </span>
-                </div>
               </div>
-              <button
-                onClick={() => onResume(selected)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold flex-shrink-0 transition-all"
-                style={{
-                  background: "linear-gradient(135deg, #5533ff, #8844ff)",
-                  color: "#fff",
-                  boxShadow: "0 0 12px rgba(85,51,255,0.3)",
-                }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 20px rgba(85,51,255,0.5)";
-                }}
-                onMouseLeave={(e) => {
-                  (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 12px rgba(85,51,255,0.3)";
-                }}
-              >
-                <Play size={11} />
-                Resume
-              </button>
+              {/* Meta row */}
+              <div className="flex items-center gap-2 flex-wrap">
+                {agentMeta && (
+                  <span className="text-xs font-semibold" style={{ color: agentMeta.color }}>
+                    {agentMeta.label}
+                  </span>
+                )}
+                <span className="text-xs font-mono" style={{ color: "#35355a" }}>
+                  {new Date(selected.createdAt).toLocaleString()}
+                </span>
+                <span className="text-xs font-mono" style={{ color: "#252545" }}>
+                  {selected.sessionId.slice(0, 8)}…
+                </span>
+              </div>
+              {/* Folder + Resume row */}
+              <div className="flex items-center gap-2">
+                <FolderOpen size={10} style={{ color: "#252545", flexShrink: 0 }} />
+                <span className="text-xs font-mono truncate flex-1 min-w-0" style={{ color: "#35355a" }}>
+                  {selected.cwd}
+                </span>
+                <button
+                  onClick={() => onResume(selected)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold flex-shrink-0 transition-all"
+                  style={{
+                    background: "linear-gradient(135deg, #5533ff, #8844ff)",
+                    color: "#fff",
+                    boxShadow: "0 0 12px rgba(85,51,255,0.3)",
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 20px rgba(85,51,255,0.5)";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 12px rgba(85,51,255,0.3)";
+                  }}
+                >
+                  <Play size={11} />
+                  Resume
+                </button>
+              </div>
             </div>
 
             {/* Messages */}
