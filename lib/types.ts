@@ -28,6 +28,8 @@ export interface Agent {
   endedAt?: number;
   cost?: number;
   error?: string;
+  sessionId?: string;        // assigned after agent starts (from system_init)
+  resumeSessionId?: string;  // set when resuming a past session
 }
 
 export const AGENT_META: Record<

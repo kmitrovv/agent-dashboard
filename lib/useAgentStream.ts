@@ -4,7 +4,10 @@ import { Agent } from "./types";
 
 type UpdateFn = (id: string, updater: (agent: Agent) => Agent) => void;
 
-export function useAgentStream(updateAgent: UpdateFn) {
+export function useAgentStream(
+  updateAgent: UpdateFn,
+  onAuthError?: () => void
+) {
   const startStream = useCallback(
     async (agent: Agent) => {
       updateAgent(agent.id, (a) => ({ ...a, status: "running" }));
@@ -17,6 +20,7 @@ export function useAgentStream(updateAgent: UpdateFn) {
             prompt: agent.prompt,
             type: agent.type,
             cwd: agent.cwd,
+            resumeSessionId: agent.resumeSessionId,
           }),
         });
 
@@ -43,15 +47,9 @@ export function useAgentStream(updateAgent: UpdateFn) {
             if (!line.startsWith("data: ")) continue;
             const raw = line.slice(6).trim();
             if (!raw) continue;
-
             let event: Record<string, unknown>;
-            try {
-              event = JSON.parse(raw);
-            } catch {
-              continue;
-            }
-
-            handleEvent(agent.id, event, updateAgent);
+            try { event = JSON.parse(raw); } catch { continue; }
+            handleEvent(agent.id, event, updateAgent, onAuthError);
           }
         }
       } catch (err) {
@@ -63,7 +61,7 @@ export function useAgentStream(updateAgent: UpdateFn) {
         }));
       }
     },
-    [updateAgent]
+    [updateAgent, onAuthError]
   );
 
   return { startStream };
@@ -72,41 +70,32 @@ export function useAgentStream(updateAgent: UpdateFn) {
 function handleEvent(
   agentId: string,
   event: Record<string, unknown>,
-  update: UpdateFn
+  update: UpdateFn,
+  onAuthError?: () => void
 ) {
   const type = event.type as string;
 
-  if (type === "text_block") {
+  if (type === "system_init") {
+    update(agentId, (a) => ({ ...a, sessionId: event.session_id as string }));
+  } else if (type === "text_block") {
     update(agentId, (a) => ({
       ...a,
-      blocks: [
-        ...a.blocks,
-        { type: "text", content: (event.content as string) ?? "" },
-      ],
+      blocks: [...a.blocks, { type: "text", content: (event.content as string) ?? "" }],
     }));
   } else if (type === "tool_use") {
     update(agentId, (a) => ({
       ...a,
-      blocks: [
-        ...a.blocks,
-        {
-          type: "tool_use",
-          content: "",
-          toolName: event.name as string,
-          toolInput: event.input as Record<string, unknown>,
-        },
-      ],
+      blocks: [...a.blocks, {
+        type: "tool_use",
+        content: "",
+        toolName: event.name as string,
+        toolInput: event.input as Record<string, unknown>,
+      }],
     }));
   } else if (type === "tool_result") {
     update(agentId, (a) => ({
       ...a,
-      blocks: [
-        ...a.blocks,
-        {
-          type: "tool_result",
-          content: (event.content as string) ?? "",
-        },
-      ],
+      blocks: [...a.blocks, { type: "tool_result", content: (event.content as string) ?? "" }],
     }));
   } else if (type === "agent_complete") {
     update(agentId, (a) => ({
@@ -115,6 +104,14 @@ function handleEvent(
       endedAt: Date.now(),
       cost: event.cost as number | undefined,
     }));
+  } else if (type === "auth_error") {
+    update(agentId, (a) => ({
+      ...a,
+      status: "error",
+      error: "Not authenticated. Please log in.",
+      endedAt: Date.now(),
+    }));
+    onAuthError?.();
   } else if (type === "agent_error") {
     update(agentId, (a) => ({
       ...a,

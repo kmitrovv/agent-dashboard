@@ -1,6 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { NextRequest } from "next/server";
 import { AGENT_META, AGENT_SYSTEM_PROMPTS, AgentType } from "@/lib/types";
+import { db } from "@/lib/db";
 import * as fs from "fs";
 
 export const dynamic = "force-dynamic";
@@ -11,8 +12,8 @@ export async function POST(request: NextRequest) {
   const prompt: string = body.prompt ?? "Introduce yourself.";
   const agentType: AgentType = body.type ?? "thinker";
   const cwd: string = body.cwd ?? process.env.HOME ?? "/";
+  const resumeSessionId: string | undefined = body.resumeSessionId;
 
-  // Validate cwd exists
   if (!fs.existsSync(cwd)) {
     return Response.json({ error: `Path does not exist: ${cwd}` }, { status: 400 });
   }
@@ -26,51 +27,62 @@ export async function POST(request: NextRequest) {
       const send = (data: object) => {
         try {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-        } catch {
-          // controller already closed
-        }
+        } catch {}
       };
 
+      let sessionId: string | null = null;
+      let isResume = !!resumeSessionId;
+
       try {
+        const queryOptions: Record<string, unknown> = {
+          cwd,
+          allowedTools: meta.tools,
+          systemPrompt: isResume ? undefined : systemPrompt,
+          permissionMode: "acceptEdits",
+          maxTurns: 30,
+        };
+
+        if (resumeSessionId) {
+          queryOptions.resume = resumeSessionId;
+        }
+
         for await (const message of query({
           prompt,
-          options: {
-            cwd,
-            allowedTools: meta.tools,
-            systemPrompt,
-            permissionMode: "acceptEdits",
-            maxTurns: 20,
-          },
+          options: queryOptions as Parameters<typeof query>[0]["options"],
         })) {
           const msg = message as Record<string, unknown>;
 
-          // System init message
           if (msg.type === "system" && msg.subtype === "init") {
-            send({ type: "system_init", session_id: msg.session_id });
+            sessionId = (msg.session_id as string) ?? null;
+            send({ type: "system_init", session_id: sessionId });
+
+            // Register in our DB
+            if (sessionId) {
+              db.upsertSession({
+                session_id: sessionId,
+                agent_type: agentType,
+                prompt: isResume ? `[resumed] ${prompt}` : prompt,
+                project_path: cwd,
+                started_at: Date.now(),
+                status: "running",
+              });
+            }
             continue;
           }
 
-          // Assistant message with content blocks
           if (msg.type === "assistant") {
             const inner = (msg.message ?? msg) as Record<string, unknown>;
             const content = (inner.content ?? []) as Array<Record<string, unknown>>;
-
             for (const block of content) {
               if (block.type === "text") {
                 send({ type: "text_block", content: block.text as string });
               } else if (block.type === "tool_use") {
-                send({
-                  type: "tool_use",
-                  name: block.name as string,
-                  input: block.input,
-                  id: block.id,
-                });
+                send({ type: "tool_use", name: block.name as string, input: block.input, id: block.id });
               }
             }
             continue;
           }
 
-          // Tool result (user turn with tool_result)
           if (msg.type === "user") {
             const inner = (msg.message ?? msg) as Record<string, unknown>;
             const content = (inner.content ?? []) as Array<Record<string, unknown>>;
@@ -81,41 +93,40 @@ export async function POST(request: NextRequest) {
                       .map((c) => (c.type === "text" ? c.text : ""))
                       .join("")
                   : String(block.content ?? "");
-                send({
-                  type: "tool_result",
-                  tool_use_id: block.tool_use_id,
-                  content: resultContent.slice(0, 500), // truncate for UI
-                });
+                send({ type: "tool_result", tool_use_id: block.tool_use_id, content: resultContent.slice(0, 500) });
               }
             }
             continue;
           }
 
-          // Result message (final)
           if ("result" in msg) {
-            send({
-              type: "agent_complete",
-              result: msg.result,
-              stop_reason: msg.stop_reason,
-              cost: msg.cost_usd,
-            });
+            const cost = msg.cost_usd as number | undefined;
+            send({ type: "agent_complete", result: msg.result, stop_reason: msg.stop_reason, cost });
+
+            if (sessionId) {
+              db.completeSession(sessionId, cost ?? null, "done");
+            }
             continue;
           }
         }
       } catch (err) {
+        const errMsg = err instanceof Error ? err.message : "Unknown error";
+        const isAuthErr =
+          errMsg.toLowerCase().includes("auth") ||
+          errMsg.toLowerCase().includes("login") ||
+          errMsg.toLowerCase().includes("credentials") ||
+          errMsg.toLowerCase().includes("unauthorized");
+
         send({
-          type: "agent_error",
-          message:
-            err instanceof Error
-              ? err.message
-              : "Unknown error. Is the Claude CLI installed and authenticated?",
+          type: isAuthErr ? "auth_error" : "agent_error",
+          message: errMsg,
         });
-      } finally {
-        try {
-          controller.close();
-        } catch {
-          // already closed
+
+        if (sessionId) {
+          db.completeSession(sessionId, null, "error");
         }
+      } finally {
+        try { controller.close(); } catch {}
       }
     },
   });
