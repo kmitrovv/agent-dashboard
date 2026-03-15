@@ -9,6 +9,7 @@ const STATUS_CONFIG: Record<
   running: { label: "RUNNING", color: "#00cc88", dotColor: "#00ff99", pulse: true },
   done: { label: "DONE", color: "#4488ff", dotColor: "#4488ff", pulse: false },
   error: { label: "ERROR", color: "#ff4466", dotColor: "#ff4466", pulse: false },
+  cancelled: { label: "CANCELLED", color: "#806880", dotColor: "#806880", pulse: false },
 };
 
 export function StatusBadge({ status }: { status: AgentStatus }) {

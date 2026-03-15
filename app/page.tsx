@@ -1,6 +1,6 @@
 "use client";
 import { useState, useCallback, useEffect } from "react";
-import { Agent, AgentType, AGENT_META } from "@/lib/types";
+import { Agent, AgentType, AGENT_META, ImageAttachment } from "@/lib/types";
 import { AgentCard } from "@/components/AgentCard";
 import { NewAgentModal } from "@/components/NewAgentModal";
 import { ProjectSelector, addRecentProject } from "@/components/ProjectSelector";
@@ -44,10 +44,10 @@ function Dashboard() {
     setAgents((prev) => prev.map((a) => (a.id === id ? updater(a) : a)));
   }, []);
 
-  const { startStream } = useAgentStream(updateAgent, () => setShowAuthModal(true));
+  const { startStream, cancelStream } = useAgentStream(updateAgent, () => setShowAuthModal(true));
 
   const spawnAgent = useCallback(
-    (type: AgentType, prompt: string, resumeSessionId?: string) => {
+    (type: AgentType, prompt: string, resumeSessionId?: string, images?: ImageAttachment[]) => {
       counter++;
       const id = `agent-${counter}-${Date.now()}`;
       const agent: Agent = {
@@ -60,12 +60,42 @@ function Dashboard() {
         blocks: [],
         startedAt: Date.now(),
         resumeSessionId,
+        images,
       };
       setAgents((prev) => [...prev, agent]);
       setSelectedId(id);
       setTimeout(() => startStream(agent), 0);
     },
     [startStream, project]
+  );
+
+  const cancelAgent = useCallback(
+    (id: string) => cancelStream(id),
+    [cancelStream]
+  );
+
+  const continueAgent = useCallback(
+    (id: string, prompt: string, images?: ImageAttachment[]) => {
+      const agent = agents.find((a) => a.id === id);
+      if (!agent?.sessionId) return;
+      const updated: Agent = {
+        ...agent,
+        prompt,
+        images,
+        resumeSessionId: agent.sessionId,
+        sessionId: undefined,
+        status: "queued",
+        endedAt: undefined,
+        cost: undefined,
+        blocks: [
+          ...agent.blocks,
+          { type: "user_message" as const, content: prompt },
+        ],
+      };
+      setAgents((prev) => prev.map((a) => (a.id === id ? updated : a)));
+      setTimeout(() => startStream(updated), 0);
+    },
+    [agents, startStream]
   );
 
   const resumeSession = useCallback(
@@ -192,14 +222,34 @@ function Dashboard() {
         {agents.length === 0 ? (
           <EmptyState onNew={() => setShowModal(true)} onHistory={() => setShowSessions(true)} hasProject={!!project} />
         ) : layout === "grid" ? (
-          <GridView agents={agents} selectedId={selectedId} onSelect={setSelectedId} onRemove={removeAgent} />
+          <GridView
+            agents={agents}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            onRemove={removeAgent}
+            onCancel={cancelAgent}
+            onContinue={continueAgent}
+          />
         ) : (
-          <FocusView agents={agents} selectedId={selectedId} selectedAgent={selectedAgent} onSelect={setSelectedId} onRemove={removeAgent} />
+          <FocusView
+            agents={agents}
+            selectedId={selectedId}
+            selectedAgent={selectedAgent}
+            onSelect={setSelectedId}
+            onRemove={removeAgent}
+            onCancel={cancelAgent}
+            onContinue={continueAgent}
+          />
         )}
       </main>
 
       {showModal && (
-        <NewAgentModal onSubmit={spawnAgent} onClose={() => setShowModal(false)} hasProject={!!project} />
+        <NewAgentModal
+          onSubmit={(type, prompt, images) => spawnAgent(type, prompt, undefined, images)}
+          onClose={() => setShowModal(false)}
+          hasProject={!!project}
+          project={project}
+        />
       )}
 
       <SessionsDrawer
@@ -212,29 +262,42 @@ function Dashboard() {
   );
 }
 
+/* ─── Shared agent-card props ──────────────────────────────── */
+interface CardCallbacks {
+  onSelect: (id: string) => void;
+  onRemove: (id: string) => void;
+  onCancel: (id: string) => void;
+  onContinue: (id: string, prompt: string, images?: ImageAttachment[]) => void;
+}
+
 /* ─── Grid View ─────────────────────────────────────────────── */
-function GridView({ agents, selectedId, onSelect, onRemove }: {
+function GridView({ agents, selectedId, onSelect, onRemove, onCancel, onContinue }: {
   agents: Agent[]; selectedId: string | null;
-  onSelect: (id: string) => void; onRemove: (id: string) => void;
-}) {
+} & CardCallbacks) {
   const cols = agents.length === 1 ? "grid-cols-1" : agents.length === 2 ? "grid-cols-2" :
     agents.length <= 4 ? "grid-cols-2" : "grid-cols-3";
   return (
     <div className={`grid ${cols} gap-3 p-3 h-full overflow-auto`}
       style={{ gridAutoRows: agents.length <= 2 ? "1fr" : "minmax(280px, 1fr)" }}>
       {agents.map((agent) => (
-        <AgentCard key={agent.id} agent={agent} isSelected={agent.id === selectedId}
-          onClick={() => onSelect(agent.id)} onRemove={onRemove} />
+        <AgentCard
+          key={agent.id}
+          agent={agent}
+          isSelected={agent.id === selectedId}
+          onClick={() => onSelect(agent.id)}
+          onRemove={onRemove}
+          onCancel={() => onCancel(agent.id)}
+          onContinue={(prompt, images) => onContinue(agent.id, prompt, images)}
+        />
       ))}
     </div>
   );
 }
 
 /* ─── Focus View ─────────────────────────────────────────────── */
-function FocusView({ agents, selectedId, selectedAgent, onSelect, onRemove }: {
+function FocusView({ agents, selectedId, selectedAgent, onSelect, onRemove, onCancel, onContinue }: {
   agents: Agent[]; selectedId: string | null; selectedAgent: Agent | null;
-  onSelect: (id: string) => void; onRemove: (id: string) => void;
-}) {
+} & CardCallbacks) {
   return (
     <div className="flex h-full">
       <div className="w-56 flex-shrink-0 overflow-y-auto p-2 space-y-1" style={{ borderRight: "1px solid #1a1a30" }}>
@@ -242,7 +305,7 @@ function FocusView({ agents, selectedId, selectedAgent, onSelect, onRemove }: {
           const meta = AGENT_META[agent.type];
           const selected = agent.id === selectedId;
           const statusColor = agent.status === "running" ? "#00ff88" : agent.status === "done" ? "#4488ff" :
-            agent.status === "error" ? "#ff4466" : "#404060";
+            agent.status === "error" ? "#ff4466" : agent.status === "cancelled" ? "#806880" : "#404060";
           return (
             <button key={agent.id} onClick={() => onSelect(agent.id)}
               className="w-full text-left rounded-lg px-2.5 py-2 transition-all"
@@ -262,7 +325,14 @@ function FocusView({ agents, selectedId, selectedAgent, onSelect, onRemove }: {
       </div>
       <div className="flex-1 p-3 overflow-hidden">
         {selectedAgent ? (
-          <AgentCard agent={selectedAgent} isSelected onClick={() => {}} onRemove={onRemove} />
+          <AgentCard
+            agent={selectedAgent}
+            isSelected
+            onClick={() => {}}
+            onRemove={onRemove}
+            onCancel={() => onCancel(selectedAgent.id)}
+            onContinue={(prompt, images) => onContinue(selectedAgent.id, prompt, images)}
+          />
         ) : (
           <div className="flex items-center justify-center h-full">
             <p className="text-sm" style={{ color: "#25255a" }}>Select an agent</p>

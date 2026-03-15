@@ -7,12 +7,18 @@ import * as fs from "fs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
+interface IncomingImage {
+  data: string;
+  mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+}
+
 export async function POST(request: NextRequest) {
   const body = await request.json();
   const prompt: string = body.prompt ?? "Introduce yourself.";
   const agentType: AgentType = body.type ?? "thinker";
   const cwd: string = body.cwd ?? process.env.HOME ?? "/";
   const resumeSessionId: string | undefined = body.resumeSessionId;
+  const images: IncomingImage[] | undefined = body.images?.length ? body.images : undefined;
 
   if (!fs.existsSync(cwd)) {
     return Response.json({ error: `Path does not exist: ${cwd}` }, { status: 400 });
@@ -46,8 +52,29 @@ export async function POST(request: NextRequest) {
           queryOptions.resume = resumeSessionId;
         }
 
+        // If images are attached, build a multimodal content array instead of a plain string
+        const promptParam = images
+          ? (async function* () {
+              yield {
+                type: "user" as const,
+                message: {
+                  role: "user" as const,
+                  content: [
+                    ...images.map((img) => ({
+                      type: "image" as const,
+                      source: { type: "base64" as const, media_type: img.mediaType, data: img.data },
+                    })),
+                    { type: "text" as const, text: prompt },
+                  ],
+                },
+                parent_tool_use_id: null,
+                session_id: "",
+              };
+            })()
+          : prompt;
+
         for await (const message of query({
-          prompt,
+          prompt: promptParam,
           options: queryOptions as Parameters<typeof query>[0]["options"],
         })) {
           const msg = message as Record<string, unknown>;

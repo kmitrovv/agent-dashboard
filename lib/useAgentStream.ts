@@ -1,5 +1,5 @@
 "use client";
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { Agent } from "./types";
 
 type UpdateFn = (id: string, updater: (agent: Agent) => Agent) => void;
@@ -8,8 +8,13 @@ export function useAgentStream(
   updateAgent: UpdateFn,
   onAuthError?: () => void
 ) {
+  const controllersRef = useRef<Map<string, AbortController>>(new Map());
+
   const startStream = useCallback(
     async (agent: Agent) => {
+      const controller = new AbortController();
+      controllersRef.current.set(agent.id, controller);
+
       updateAgent(agent.id, (a) => ({ ...a, status: "running" }));
 
       try {
@@ -21,7 +26,9 @@ export function useAgentStream(
             type: agent.type,
             cwd: agent.cwd,
             resumeSessionId: agent.resumeSessionId,
+            images: agent.images?.map(({ data, mediaType }) => ({ data, mediaType })),
           }),
+          signal: controller.signal,
         });
 
         if (!response.ok) {
@@ -53,18 +60,32 @@ export function useAgentStream(
           }
         }
       } catch (err) {
-        updateAgent(agent.id, (a) => ({
-          ...a,
-          status: "error",
-          error: err instanceof Error ? err.message : "Stream failed",
-          endedAt: Date.now(),
-        }));
+        if (err instanceof Error && err.name === "AbortError") {
+          updateAgent(agent.id, (a) => ({
+            ...a,
+            status: "cancelled",
+            endedAt: Date.now(),
+          }));
+        } else {
+          updateAgent(agent.id, (a) => ({
+            ...a,
+            status: "error",
+            error: err instanceof Error ? err.message : "Stream failed",
+            endedAt: Date.now(),
+          }));
+        }
+      } finally {
+        controllersRef.current.delete(agent.id);
       }
     },
     [updateAgent, onAuthError]
   );
 
-  return { startStream };
+  const cancelStream = useCallback((agentId: string) => {
+    controllersRef.current.get(agentId)?.abort();
+  }, []);
+
+  return { startStream, cancelStream };
 }
 
 function handleEvent(

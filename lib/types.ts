@@ -6,14 +6,21 @@ export type AgentType =
   | "thinker"
   | "planner";
 
-export type AgentStatus = "queued" | "running" | "done" | "error";
+export type AgentStatus = "queued" | "running" | "done" | "error" | "cancelled";
 
 export interface ContentBlock {
-  type: "thinking" | "text" | "tool_use" | "tool_result" | "system";
+  type: "thinking" | "text" | "tool_use" | "tool_result" | "system" | "user_message";
   content: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
   isStreaming?: boolean;
+}
+
+export interface ImageAttachment {
+  data: string;       // raw base64 (no data-URL prefix)
+  mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+  name: string;       // filename for display
+  previewUrl: string; // full data-URL for <img src>
 }
 
 export interface Agent {
@@ -30,6 +37,7 @@ export interface Agent {
   error?: string;
   sessionId?: string;        // assigned after agent starts (from system_init)
   resumeSessionId?: string;  // set when resuming a past session
+  images?: ImageAttachment[]; // images attached to the most recent user turn
 }
 
 export const AGENT_META: Record<
