@@ -384,7 +384,7 @@ export function AgentCard({ agent, onRemove, onCancel, onContinue, isSelected, o
 
   const lastTool = [...agent.blocks].reverse().find((b) => b.type === "tool_use");
   const visibleBlocks = agent.blocks.filter(
-    (b) => b.type === "text" || b.type === "tool_use"
+    (b) => b.type === "text" || b.type === "tool_use" || b.type === "user_message"
   );
   const dirName = agent.cwd.split("/").filter(Boolean).pop() ?? agent.cwd;
   const isRunning = agent.status === "running";
@@ -529,7 +529,7 @@ export function AgentCard({ agent, onRemove, onCancel, onContinue, isSelected, o
                     {TOOL_LABELS[lastTool.toolName ?? ""]?.label ?? lastTool.toolName}…
                   </span>
                 </>
-              ) : visibleBlocks.length === 0 ? (
+              ) : visibleBlocks.filter((b) => b.type !== "user_message").length === 0 ? (
                 <>
                   <span className="inline-block w-1 h-1 rounded-full animate-pulse" style={{ background: "#5555a0" }} />
                   <span className="font-mono">initializing…</span>
