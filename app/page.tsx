@@ -12,12 +12,54 @@ import { Plus, LayoutGrid, Columns, Cpu, Trash2, History, Zap, Paperclip, X as X
 let counter = 0;
 type Layout = "grid" | "focus";
 
+/* ─── SessionSummary type ─────────────────────────────────────── */
+interface SessionSummary {
+  sessionId: string;
+  cwd: string;
+  firstPrompt: string;
+  summary: string;
+  lastModified: number;
+  createdAt: number;
+  fileSize: number;
+  agentType?: string;
+  costUsd?: number;
+  status?: string;
+}
+
+/* ─── ago() helper ────────────────────────────────────────────── */
+function ago(ts: number): string {
+  const diff = Date.now() - ts;
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+/* ─── useSessions hook ────────────────────────────────────────── */
+function useSessions(project: string, refreshKey: number) {
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    setLoading(true);
+    const params = new URLSearchParams({ limit: "10" });
+    if (project) params.set("project", project);
+    fetch(`/api/sessions?${params}`)
+      .then((r) => r.json())
+      .then((d) => setSessions(d.sessions ?? []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [project, refreshKey]);
+  return { sessions, loading };
+}
+
 /** Convert raw SDK MessageParam[] into our ContentBlock[] for display */
 function convertMessagesToBlocks(messages: unknown[]): ContentBlock[] {
   const blocks: ContentBlock[] = [];
   for (const msg of messages) {
     const m = msg as Record<string, unknown>;
-    // SDK may return {role, content} or {type:'user'|'assistant', message:{role,content}}
     const role = (m.role ?? (m.message as Record<string, unknown>)?.role) as string | undefined;
     const rawContent = m.content ?? (m.message as Record<string, unknown>)?.content ?? [];
     const parts: Array<Record<string, unknown>> =
@@ -40,7 +82,6 @@ function convertMessagesToBlocks(messages: unknown[]): ContentBlock[] {
           });
         }
       } else if (role === "user") {
-        // Only show plain text user turns (not tool_result injections)
         if (block.type === "text" && block.text) {
           const text = String(block.text).trim();
           if (text) blocks.push({ type: "user_message", content: text });
@@ -67,6 +108,7 @@ function Dashboard() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [layout, setLayout] = useState<Layout>("grid");
   const [project, setProject] = useState<string>("");
+  const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
 
   useEffect(() => {
     const saved = localStorage.getItem("agent-dashboard:project");
@@ -119,7 +161,6 @@ function Dashboard() {
       if (!agent) return;
 
       if (!agent.sessionId) {
-        // Cancelled before session was initialised — restart fresh with new prompt
         const fresh: Agent = {
           ...agent,
           prompt,
@@ -138,7 +179,6 @@ function Dashboard() {
         return;
       }
 
-      // Normal resume — continue existing session
       const updated: Agent = {
         ...agent,
         prompt,
@@ -159,7 +199,6 @@ function Dashboard() {
     [agents, startStream]
   );
 
-  // Track in-flight resume fetches so we don't double-load
   const resumingRef = useRef<Set<string>>(new Set());
 
   const resumeSession = useCallback(
@@ -173,7 +212,6 @@ function Dashboard() {
       const id = `agent-${counter}-${Date.now()}`;
       const type: AgentType = (session.agentType as AgentType) ?? "thinker";
 
-      // Add a loading placeholder immediately
       const placeholder: Agent = {
         id,
         name: `${AGENT_META[type].label} #${counter}`,
@@ -188,7 +226,6 @@ function Dashboard() {
       setAgents((prev) => [...prev, placeholder]);
       setSelectedId(id);
 
-      // Fetch the real conversation history
       let blocks: ContentBlock[] = [];
       try {
         const resp = await fetch("/api/sessions", {
@@ -200,13 +237,14 @@ function Dashboard() {
         blocks = convertMessagesToBlocks(data.messages ?? []);
       } catch {}
 
-      // Flip to "done" with history loaded — reply input will appear
       setAgents((prev) =>
         prev.map((a) =>
           a.id === id ? { ...a, status: "done", blocks, endedAt: Date.now() } : a
         )
       );
       resumingRef.current.delete(session.sessionId);
+      // Refresh sidebar sessions after resume completes
+      setSessionRefreshKey((k) => k + 1);
     },
     [handleProjectChange]
   );
@@ -215,6 +253,8 @@ function Dashboard() {
     setAgents((prev) => prev.filter((a) => a.id !== id));
     setSelectedId((prev) => (prev === id ? null : prev));
   }, []);
+
+  const { sessions, loading: sessionsLoading } = useSessions(project, sessionRefreshKey);
 
   const runningCount = agents.filter((a) => a.status === "running").length;
   const doneCount = agents.filter((a) => a.status === "done").length;
@@ -317,36 +357,50 @@ function Dashboard() {
         </button>
       </header>
 
-      {/* Main */}
-      <main className="flex-1 overflow-hidden">
-        {agents.length === 0 ? (
-          <HomeInput
-            onSubmit={(type, prompt, images) => spawnAgent(type, prompt, undefined, images)}
-            onHistory={() => setShowSessions(true)}
-            hasProject={!!project}
-            project={project}
-          />
-        ) : layout === "grid" ? (
-          <GridView
-            agents={agents}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onRemove={removeAgent}
-            onCancel={cancelAgent}
-            onContinue={continueAgent}
-          />
-        ) : (
-          <FocusView
-            agents={agents}
-            selectedId={selectedId}
-            selectedAgent={selectedAgent}
-            onSelect={setSelectedId}
-            onRemove={removeAgent}
-            onCancel={cancelAgent}
-            onContinue={continueAgent}
-          />
-        )}
-      </main>
+      {/* Body: sidebar + main */}
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar
+          agents={agents}
+          sessions={sessions}
+          sessionsLoading={sessionsLoading}
+          selectedId={selectedId}
+          onSelectAgent={setSelectedId}
+          onResumeSession={resumeSession}
+          onOpenHistory={() => setShowSessions(true)}
+          currentProject={project}
+        />
+
+        {/* Main content area */}
+        <div className="flex-1 overflow-hidden">
+          {agents.length === 0 ? (
+            <HomeInput
+              onSubmit={(type, prompt, images) => spawnAgent(type, prompt, undefined, images)}
+              onHistory={() => setShowSessions(true)}
+              hasProject={!!project}
+              project={project}
+            />
+          ) : layout === "grid" ? (
+            <GridView
+              agents={agents}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onRemove={removeAgent}
+              onCancel={cancelAgent}
+              onContinue={continueAgent}
+            />
+          ) : (
+            <FocusView
+              agents={agents}
+              selectedId={selectedId}
+              selectedAgent={selectedAgent}
+              onSelect={setSelectedId}
+              onRemove={removeAgent}
+              onCancel={cancelAgent}
+              onContinue={continueAgent}
+            />
+          )}
+        </div>
+      </div>
 
       {showModal && (
         <NewAgentModal
@@ -364,6 +418,224 @@ function Dashboard() {
         onResume={resumeSession}
       />
     </div>
+  );
+}
+
+/* ─── Sidebar ────────────────────────────────────────────────── */
+function Sidebar({
+  agents,
+  sessions,
+  sessionsLoading,
+  selectedId,
+  onSelectAgent,
+  onResumeSession,
+  onOpenHistory,
+  currentProject,
+}: {
+  agents: Agent[];
+  sessions: SessionSummary[];
+  sessionsLoading: boolean;
+  selectedId: string | null;
+  onSelectAgent: (id: string) => void;
+  onResumeSession: (s: SessionSummary) => void;
+  onOpenHistory: () => void;
+  currentProject: string;
+}) {
+  // Filter out sessions that are already open as active agents
+  const activeSessionIds = new Set(agents.map((a) => a.sessionId).filter(Boolean));
+  const filteredSessions = sessions.filter((s) => !activeSessionIds.has(s.sessionId));
+
+  // Folder basename helper
+  const folderName = (cwd: string) => cwd.split("/").filter(Boolean).pop() ?? cwd;
+
+  return (
+    <div
+      className="flex flex-col flex-shrink-0 overflow-hidden"
+      style={{
+        width: 220,
+        borderRight: "1px solid #1a1a30",
+        background: "#0a0a14",
+      }}
+    >
+      {/* Active agents section */}
+      {agents.length > 0 && (
+        <div className="flex-shrink-0">
+          <div
+            className="px-3 pt-3 pb-1.5 text-xs font-semibold uppercase tracking-wider"
+            style={{ color: "#35355a" }}
+          >
+            Active
+          </div>
+          <div className="px-2 space-y-0.5 pb-2">
+            {agents.map((agent) => {
+              const meta = AGENT_META[agent.type];
+              const selected = agent.id === selectedId;
+              const statusColor =
+                agent.status === "running"
+                  ? "#00ff88"
+                  : agent.status === "done"
+                  ? "#4488ff"
+                  : agent.status === "error"
+                  ? "#ff4466"
+                  : agent.status === "cancelled"
+                  ? "#806880"
+                  : "#404060";
+              return (
+                <button
+                  key={agent.id}
+                  onClick={() => onSelectAgent(agent.id)}
+                  className="w-full text-left rounded-lg px-2 py-1.5 transition-all"
+                  style={{
+                    background: selected ? `${meta.color}15` : "transparent",
+                    border: `1px solid ${selected ? meta.color + "35" : "transparent"}`,
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!selected)
+                      (e.currentTarget as HTMLButtonElement).style.background = "#12121e";
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!selected)
+                      (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+                  }}
+                >
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    <span className="text-xs leading-none">{meta.emoji}</span>
+                    <span
+                      className="text-xs font-semibold truncate flex-1"
+                      style={{ color: selected ? meta.color : "#8080b0", fontSize: "11px" }}
+                    >
+                      {meta.label}
+                    </span>
+                    <span
+                      className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                      style={{ background: statusColor }}
+                    />
+                  </div>
+                  <p className="text-xs truncate" style={{ color: "#404060", fontSize: "11px" }}>
+                    {agent.prompt}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ borderTop: "1px solid #1a1a30", margin: "0 8px" }} />
+        </div>
+      )}
+
+      {/* Recent sessions section */}
+      <div className="flex flex-col flex-1 overflow-hidden">
+        <div
+          className="px-3 pt-3 pb-1.5 text-xs font-semibold uppercase tracking-wider flex-shrink-0"
+          style={{ color: "#35355a" }}
+        >
+          Recent
+        </div>
+        <div className="flex-1 overflow-y-auto px-2 space-y-0.5 pb-2">
+          {sessionsLoading && filteredSessions.length === 0 && (
+            <p className="text-xs px-2 py-2" style={{ color: "#2a2a48" }}>
+              Loading…
+            </p>
+          )}
+          {!sessionsLoading && filteredSessions.length === 0 && (
+            <p className="text-xs px-2 py-2" style={{ color: "#2a2a48" }}>
+              {currentProject ? "No sessions yet" : "Set a project to see history"}
+            </p>
+          )}
+          {filteredSessions.map((session) => {
+            const type = (session.agentType as AgentType) ?? "thinker";
+            const meta = AGENT_META[type] ?? AGENT_META["thinker"];
+            return (
+              <SidebarSessionItem
+                key={session.sessionId}
+                session={session}
+                meta={meta}
+                folderName={folderName(session.cwd)}
+                onResume={onResumeSession}
+              />
+            );
+          })}
+        </div>
+      </div>
+
+      {/* View all history link */}
+      <div className="flex-shrink-0 px-3 py-2.5" style={{ borderTop: "1px solid #1a1a30" }}>
+        <button
+          onClick={onOpenHistory}
+          className="w-full text-left text-xs transition-colors"
+          style={{ color: "#404068" }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.color = "#9977ff";
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.color = "#404068";
+          }}
+        >
+          <span className="flex items-center gap-1.5">
+            <History size={11} />
+            View all history
+          </span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SidebarSessionItem({
+  session,
+  meta,
+  folderName,
+  onResume,
+}: {
+  session: SessionSummary;
+  meta: (typeof AGENT_META)[AgentType];
+  folderName: string;
+  onResume: (s: SessionSummary) => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <button
+      onClick={() => onResume(session)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      className="w-full text-left rounded-lg px-2 py-1.5 transition-all relative"
+      style={{
+        background: hovered ? "#14142a" : "transparent",
+        border: `1px solid ${hovered ? "#2a2a45" : "transparent"}`,
+      }}
+    >
+      <div className="flex items-start gap-1.5">
+        <span className="text-xs leading-none mt-0.5 flex-shrink-0" style={{ opacity: 0.7 }}>
+          {meta.emoji}
+        </span>
+        <div className="flex-1 min-w-0">
+          <p
+            className="truncate leading-tight"
+            style={{ color: hovered ? "#a0a0cc" : "#606080", fontSize: "11px" }}
+          >
+            {session.firstPrompt || session.summary || "Session"}
+          </p>
+          <div className="flex items-center gap-1 mt-0.5">
+            <span style={{ color: "#35355a", fontSize: "10px" }}>{ago(session.lastModified)}</span>
+            <span style={{ color: "#25254a", fontSize: "10px" }}>·</span>
+            <span
+              className="truncate"
+              style={{ color: "#35355a", fontSize: "10px", maxWidth: 80 }}
+            >
+              {folderName}
+            </span>
+          </div>
+        </div>
+        {hovered && (
+          <span
+            className="flex-shrink-0 text-xs"
+            style={{ color: "#6644ff", fontSize: "10px", marginTop: 1 }}
+          >
+            ▶
+          </span>
+        )}
+      </div>
+    </button>
   );
 }
 
@@ -403,47 +675,47 @@ function GridView({ agents, selectedId, onSelect, onRemove, onCancel, onContinue
 function FocusView({ agents, selectedId, selectedAgent, onSelect, onRemove, onCancel, onContinue }: {
   agents: Agent[]; selectedId: string | null; selectedAgent: Agent | null;
 } & CardCallbacks) {
+  // The global Sidebar handles agent listing; FocusView just shows the selected card full-width.
+  // When multiple agents exist and focus layout is chosen, show a minimal in-area selector.
+  if (agents.length > 1 && !selectedAgent) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <p className="text-sm" style={{ color: "#25255a" }}>Select an agent from the sidebar</p>
+      </div>
+    );
+  }
+  if (!selectedAgent && agents.length === 1) {
+    // Auto-show single agent
+    const agent = agents[0];
+    return (
+      <div className="p-3 h-full overflow-hidden">
+        <AgentCard
+          agent={agent}
+          isSelected
+          onClick={() => onSelect(agent.id)}
+          onRemove={onRemove}
+          onCancel={() => onCancel(agent.id)}
+          onContinue={(prompt, images) => onContinue(agent.id, prompt, images)}
+        />
+      </div>
+    );
+  }
   return (
-    <div className="flex h-full">
-      <div className="w-56 flex-shrink-0 overflow-y-auto p-2 space-y-1" style={{ borderRight: "1px solid #1a1a30" }}>
-        {agents.map((agent) => {
-          const meta = AGENT_META[agent.type];
-          const selected = agent.id === selectedId;
-          const statusColor = agent.status === "running" ? "#00ff88" : agent.status === "done" ? "#4488ff" :
-            agent.status === "error" ? "#ff4466" : agent.status === "cancelled" ? "#806880" : "#404060";
-          return (
-            <button key={agent.id} onClick={() => onSelect(agent.id)}
-              className="w-full text-left rounded-lg px-2.5 py-2 transition-all"
-              style={{ background: selected ? `${meta.color}15` : "transparent", border: `1px solid ${selected ? meta.color + "35" : "transparent"}` }}
-              onMouseEnter={(e) => { if (!selected) (e.currentTarget as HTMLButtonElement).style.background = "#12121e"; }}
-              onMouseLeave={(e) => { if (!selected) (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
-            >
-              <div className="flex items-center gap-2 mb-0.5">
-                <span className="text-sm leading-none">{meta.emoji}</span>
-                <span className="text-xs font-semibold" style={{ color: selected ? meta.color : "#8080b0" }}>{meta.label}</span>
-                <span className="ml-auto w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: statusColor }} />
-              </div>
-              <p className="text-xs truncate" style={{ color: "#404060" }}>{agent.prompt}</p>
-            </button>
-          );
-        })}
-      </div>
-      <div className="flex-1 p-3 overflow-hidden">
-        {selectedAgent ? (
-          <AgentCard
-            agent={selectedAgent}
-            isSelected
-            onClick={() => {}}
-            onRemove={onRemove}
-            onCancel={() => onCancel(selectedAgent.id)}
-            onContinue={(prompt, images) => onContinue(selectedAgent.id, prompt, images)}
-          />
-        ) : (
-          <div className="flex items-center justify-center h-full">
-            <p className="text-sm" style={{ color: "#25255a" }}>Select an agent</p>
-          </div>
-        )}
-      </div>
+    <div className="p-3 h-full overflow-hidden">
+      {selectedAgent ? (
+        <AgentCard
+          agent={selectedAgent}
+          isSelected
+          onClick={() => {}}
+          onRemove={onRemove}
+          onCancel={() => onCancel(selectedAgent.id)}
+          onContinue={(prompt, images) => onContinue(selectedAgent.id, prompt, images)}
+        />
+      ) : (
+        <div className="flex items-center justify-center h-full">
+          <p className="text-sm" style={{ color: "#25255a" }}>Select an agent</p>
+        </div>
+      )}
     </div>
   );
 }
