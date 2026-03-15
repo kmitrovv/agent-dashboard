@@ -116,7 +116,29 @@ function Dashboard() {
   const continueAgent = useCallback(
     (id: string, prompt: string, images?: ImageAttachment[]) => {
       const agent = agents.find((a) => a.id === id);
-      if (!agent?.sessionId) return;
+      if (!agent) return;
+
+      if (!agent.sessionId) {
+        // Cancelled before session was initialised — restart fresh with new prompt
+        const fresh: Agent = {
+          ...agent,
+          prompt,
+          images,
+          resumeSessionId: undefined,
+          sessionId: undefined,
+          status: "queued",
+          endedAt: undefined,
+          cost: undefined,
+          error: undefined,
+          startedAt: Date.now(),
+          blocks: [{ type: "user_message" as const, content: prompt }],
+        };
+        setAgents((prev) => prev.map((a) => (a.id === id ? fresh : a)));
+        setTimeout(() => startStream(fresh), 0);
+        return;
+      }
+
+      // Normal resume — continue existing session
       const updated: Agent = {
         ...agent,
         prompt,

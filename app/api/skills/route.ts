@@ -75,8 +75,17 @@ function readSkillsFromDir(dir: string, source: "global" | "project"): Skill[] {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
-      if (entry.isDirectory()) {
-        // Subdirectory — look for SKILL.md, {name}.md, or README.md inside
+      // Resolve symlinks: isDirectory() returns false for symlinks, so check manually
+      let isDir = entry.isDirectory();
+      if (!isDir && entry.isSymbolicLink()) {
+        try {
+          const resolved = fs.realpathSync(path.join(dir, entry.name));
+          isDir = fs.statSync(resolved).isDirectory();
+        } catch { /* broken symlink — skip */ }
+      }
+
+      if (isDir) {
+        // Subdirectory (or symlink→dir) — look for SKILL.md, {name}.md, or README.md inside
         const subdir = path.join(dir, entry.name);
         const candidates = [
           path.join(subdir, "SKILL.md"),
@@ -95,7 +104,7 @@ function readSkillsFromDir(dir: string, source: "global" | "project"): Skill[] {
             path: skillFile,
           });
         }
-      } else if (entry.isFile() && entry.name.endsWith(".md")) {
+      } else if ((entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md")) {
         // Flat .md file
         const filePath = path.join(dir, entry.name);
         const slug = entry.name.replace(/\.md$/, "");

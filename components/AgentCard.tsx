@@ -511,7 +511,7 @@ export function AgentCard({ agent, onRemove, onCancel, onContinue, isSelected, o
               className="text-xs px-3 py-2 rounded leading-relaxed"
               style={{ color: "#907090", background: "#80408015", border: "1px solid #80408030" }}
             >
-              ◼ Cancelled
+              ◼ Cancelled — type below to continue or start fresh
             </div>
           )}
 
@@ -559,8 +559,8 @@ export function AgentCard({ agent, onRemove, onCancel, onContinue, isSelected, o
         </div>
       )}
 
-      {/* Reply input — shown when done and not collapsed */}
-      {isDone && !collapsed && onContinue && (
+      {/* Reply input — shown when done OR cancelled, and not collapsed */}
+      {(isDone || agent.status === "cancelled") && !collapsed && onContinue && (
         <ReplyInput
           onSubmit={onContinue}
           cwd={agent.cwd}
