@@ -127,6 +127,7 @@ function ReplyInput({
 }) {
   const [value, setValue] = useState("");
   const [skills, setSkills] = useState<SkillEntry[]>([]);
+  const [skillsProjectDir, setSkillsProjectDir] = useState<string | null>(null);
   const [showSkills, setShowSkills] = useState(false);
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -136,7 +137,7 @@ function ReplyInput({
     const url = cwd ? `/api/skills?cwd=${encodeURIComponent(cwd)}` : "/api/skills";
     fetch(url)
       .then((r) => r.json())
-      .then((d) => setSkills(d.skills ?? []))
+      .then((d) => { setSkills(d.skills ?? []); setSkillsProjectDir(d.paths?.projectSkills ?? d.paths?.projectCommands ?? null); })
       .catch(() => {});
   }, [cwd]);
 
@@ -178,9 +179,27 @@ function ReplyInput({
     }
   };
 
+  // Paste images anywhere inside the reply area (not just when textarea focused)
+  const handleContainerPaste = useCallback(
+    (e: React.ClipboardEvent) => {
+      const imageFiles = Array.from(e.clipboardData.items)
+        .filter((item) => item.kind === "file" && VALID_IMAGE_TYPES.includes(item.type as ValidMediaType))
+        .map((item) => item.getAsFile())
+        .filter(Boolean) as File[];
+      if (imageFiles.length > 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        addFiles(imageFiles);
+      }
+      // Text paste: let it bubble naturally to the focused textarea
+    },
+    [addFiles]
+  );
+
   return (
     <div
-      onClick={(e) => e.stopPropagation()}
+      onClick={(e) => { e.stopPropagation(); textareaRef.current?.focus(); }}
+      onPaste={handleContainerPaste}
       style={{ borderTop: "1px solid #1a1a2e", background: "#09090f", padding: "8px 10px" }}
     >
       {/* Skills chips panel */}
@@ -220,11 +239,13 @@ function ReplyInput({
               ))}
             </div>
           ) : (
-            <p className="text-xs leading-relaxed" style={{ color: "#40406a" }}>
-              No skills yet. Add <code style={{ color: "#6644ffaa" }}>.md</code> files to{" "}
-              <code style={{ color: "#6644ffaa" }}>~/.claude/commands/</code> (global) or{" "}
-              <code style={{ color: "#6644ffaa" }}>.claude/commands/</code> in your project.
-            </p>
+            <div className="text-xs leading-relaxed space-y-1" style={{ color: "#40406a" }}>
+              <p>No skills found. Add <code style={{ color: "#6644ffaa" }}>.md</code> files to:</p>
+              <p><span style={{ color: "#35355a" }}>Global: </span><code style={{ color: "#6644ff88" }}>~/.claude/commands/</code></p>
+              {skillsProjectDir && (
+                <p><span style={{ color: "#35355a" }}>Project skills: </span><code style={{ color: "#6644ff88", wordBreak: "break-all" }}>{skillsProjectDir}</code></p>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -284,19 +305,16 @@ function ReplyInput({
         <textarea
           ref={textareaRef}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            setValue(e.target.value);
+            e.target.style.height = "auto";
+            e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               handleSubmit(e);
             }
-          }}
-          onPaste={(e) => {
-            const imageFiles = Array.from(e.clipboardData.items)
-              .filter((item) => item.kind === "file" && VALID_IMAGE_TYPES.includes(item.type as ValidMediaType))
-              .map((item) => item.getAsFile())
-              .filter(Boolean) as File[];
-            if (imageFiles.length > 0) { e.preventDefault(); addFiles(imageFiles); }
           }}
           onClick={(e) => e.stopPropagation()}
           placeholder="Follow up… (↵ to send, paste images)"
@@ -308,6 +326,9 @@ function ReplyInput({
             color: "#c0c0e8",
             caretColor: agentColor,
             lineHeight: "1.5",
+            minHeight: "30px",
+            maxHeight: "160px",
+            overflow: "auto",
           }}
         />
 

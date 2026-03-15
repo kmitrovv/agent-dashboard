@@ -44,7 +44,7 @@ export async function POST(request: NextRequest) {
           cwd,
           allowedTools: meta.tools,
           systemPrompt: isResume ? undefined : systemPrompt,
-          permissionMode: "acceptEdits",
+          permissionMode: "bypassPermissions",
           maxTurns: 30,
         };
 

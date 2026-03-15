@@ -1,16 +1,55 @@
 "use client";
-import { useState, useCallback, useEffect } from "react";
-import { Agent, AgentType, AGENT_META, ImageAttachment } from "@/lib/types";
+import { useState, useCallback, useEffect, useRef } from "react";
+import { Agent, AgentType, AGENT_META, ImageAttachment, ContentBlock } from "@/lib/types";
 import { AgentCard } from "@/components/AgentCard";
 import { NewAgentModal } from "@/components/NewAgentModal";
 import { ProjectSelector, addRecentProject } from "@/components/ProjectSelector";
 import { AuthGate, AuthBadge } from "@/components/AuthGate";
 import { SessionsDrawer } from "@/components/SessionsDrawer";
 import { useAgentStream } from "@/lib/useAgentStream";
-import { Plus, LayoutGrid, Columns, Cpu, Trash2, History } from "lucide-react";
+import { Plus, LayoutGrid, Columns, Cpu, Trash2, History, Zap, Paperclip, X as XIcon, CornerDownLeft } from "lucide-react";
 
 let counter = 0;
 type Layout = "grid" | "focus";
+
+/** Convert raw SDK MessageParam[] into our ContentBlock[] for display */
+function convertMessagesToBlocks(messages: unknown[]): ContentBlock[] {
+  const blocks: ContentBlock[] = [];
+  for (const msg of messages) {
+    const m = msg as Record<string, unknown>;
+    // SDK may return {role, content} or {type:'user'|'assistant', message:{role,content}}
+    const role = (m.role ?? (m.message as Record<string, unknown>)?.role) as string | undefined;
+    const rawContent = m.content ?? (m.message as Record<string, unknown>)?.content ?? [];
+    const parts: Array<Record<string, unknown>> =
+      typeof rawContent === "string"
+        ? [{ type: "text", text: rawContent }]
+        : Array.isArray(rawContent)
+        ? (rawContent as Array<Record<string, unknown>>)
+        : [];
+
+    for (const block of parts) {
+      if (role === "assistant") {
+        if (block.type === "text" && block.text) {
+          blocks.push({ type: "text", content: String(block.text) });
+        } else if (block.type === "tool_use") {
+          blocks.push({
+            type: "tool_use",
+            content: "",
+            toolName: block.name as string,
+            toolInput: block.input as Record<string, unknown>,
+          });
+        }
+      } else if (role === "user") {
+        // Only show plain text user turns (not tool_result injections)
+        if (block.type === "text" && block.text) {
+          const text = String(block.text).trim();
+          if (text) blocks.push({ type: "user_message", content: text });
+        }
+      }
+    }
+  }
+  return blocks;
+}
 
 export default function App() {
   return (
@@ -98,17 +137,56 @@ function Dashboard() {
     [agents, startStream]
   );
 
+  // Track in-flight resume fetches so we don't double-load
+  const resumingRef = useRef<Set<string>>(new Set());
+
   const resumeSession = useCallback(
-    (session: { sessionId: string; agentType?: string; firstPrompt: string; cwd: string }) => {
+    async (session: { sessionId: string; agentType?: string; firstPrompt: string; cwd: string }) => {
+      if (resumingRef.current.has(session.sessionId)) return;
+      resumingRef.current.add(session.sessionId);
       setShowSessions(false);
       handleProjectChange(session.cwd);
-      spawnAgent(
-        (session.agentType as AgentType) ?? "thinker",
-        session.firstPrompt || "Continue from where we left off.",
-        session.sessionId
+
+      counter++;
+      const id = `agent-${counter}-${Date.now()}`;
+      const type: AgentType = (session.agentType as AgentType) ?? "thinker";
+
+      // Add a loading placeholder immediately
+      const placeholder: Agent = {
+        id,
+        name: `${AGENT_META[type].label} #${counter}`,
+        type,
+        prompt: session.firstPrompt,
+        cwd: session.cwd,
+        status: "queued",
+        blocks: [],
+        startedAt: Date.now(),
+        sessionId: session.sessionId,
+      };
+      setAgents((prev) => [...prev, placeholder]);
+      setSelectedId(id);
+
+      // Fetch the real conversation history
+      let blocks: ContentBlock[] = [];
+      try {
+        const resp = await fetch("/api/sessions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: session.sessionId }),
+        });
+        const data = await resp.json();
+        blocks = convertMessagesToBlocks(data.messages ?? []);
+      } catch {}
+
+      // Flip to "done" with history loaded — reply input will appear
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === id ? { ...a, status: "done", blocks, endedAt: Date.now() } : a
+        )
       );
+      resumingRef.current.delete(session.sessionId);
     },
-    [spawnAgent, handleProjectChange]
+    [handleProjectChange]
   );
 
   const removeAgent = useCallback((id: string) => {
@@ -220,7 +298,12 @@ function Dashboard() {
       {/* Main */}
       <main className="flex-1 overflow-hidden">
         {agents.length === 0 ? (
-          <EmptyState onNew={() => setShowModal(true)} onHistory={() => setShowSessions(true)} hasProject={!!project} />
+          <HomeInput
+            onSubmit={(type, prompt, images) => spawnAgent(type, prompt, undefined, images)}
+            onHistory={() => setShowSessions(true)}
+            hasProject={!!project}
+            project={project}
+          />
         ) : layout === "grid" ? (
           <GridView
             agents={agents}
@@ -343,65 +426,283 @@ function FocusView({ agents, selectedId, selectedAgent, onSelect, onRemove, onCa
   );
 }
 
-/* ─── Empty State ─────────────────────────────────────────────── */
-function EmptyState({ onNew, onHistory, hasProject }: { onNew: () => void; onHistory: () => void; hasProject: boolean }) {
+/* ─── Home Input (empty state) ───────────────────────────────── */
+const HOME_VALID_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
+type HomeValidMediaType = (typeof HOME_VALID_IMAGE_TYPES)[number];
+
+function homeFileToAttachment(file: File): Promise<ImageAttachment | null> {
+  if (!HOME_VALID_IMAGE_TYPES.includes(file.type as HomeValidMediaType)) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      resolve({ data: dataUrl.split(",")[1], mediaType: file.type as HomeValidMediaType, name: file.name, previewUrl: dataUrl });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+interface HomeSkillEntry { name: string; slug: string; description: string; source: "global" | "project" }
+interface SkillPaths { projectCommands: string | null; projectSkills: string | null; global: string }
+
+function HomeInput({ onSubmit, onHistory, hasProject, project }: {
+  onSubmit: (type: AgentType, prompt: string, images?: ImageAttachment[]) => void;
+  onHistory: () => void;
+  hasProject: boolean;
+  project: string;
+}) {
+  const [type, setType] = useState<AgentType>("thinker");
+  const [prompt, setPrompt] = useState("");
+  const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [skills, setSkills] = useState<HomeSkillEntry[]>([]);
+  const [skillPaths, setSkillPaths] = useState<SkillPaths | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+
+  useEffect(() => { textareaRef.current?.focus(); }, []);
+
+  useEffect(() => {
+    const url = project ? `/api/skills?cwd=${encodeURIComponent(project)}` : "/api/skills";
+    fetch(url)
+      .then((r) => r.json())
+      .then((d) => { setSkills(d.skills ?? []); setSkillPaths(d.paths ?? null); })
+      .catch(() => {});
+  }, [project]);
+
+  const addFiles = useCallback(async (files: FileList | File[]) => {
+    const arr = Array.from(files);
+    const attachments = await Promise.all(arr.map(homeFileToAttachment));
+    setImages((prev) => [...prev, ...(attachments.filter(Boolean) as ImageAttachment[])]);
+  }, []);
+
+  const handleSubmit = useCallback(() => {
+    const p = prompt.trim();
+    if (!p || !hasProject) return;
+    onSubmit(type, p, images.length > 0 ? images : undefined);
+    setPrompt("");
+    setImages([]);
+  }, [prompt, type, images, hasProject, onSubmit]);
+
+  const insertSkill = (slug: string) => {
+    const insertion = `/${slug}`;
+    const textarea = textareaRef.current;
+    if (textarea) {
+      const pos = textarea.selectionStart ?? prompt.length;
+      const before = prompt.slice(0, pos);
+      const after = prompt.slice(pos);
+      const sep = before && !before.endsWith(" ") && !before.endsWith("\n") ? " " : "";
+      setPrompt(before + sep + insertion + (after ? " " + after : ""));
+      setTimeout(() => {
+        const newPos = (before + sep + insertion).length;
+        textarea.setSelectionRange(newPos, newPos);
+        textarea.focus();
+      }, 0);
+    } else {
+      setPrompt((p) => p ? `${p} ${insertion}` : insertion);
+    }
+    textareaRef.current?.focus();
+  };
+
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const imageFiles = Array.from(e.clipboardData.items)
+      .filter((item) => item.kind === "file" && HOME_VALID_IMAGE_TYPES.includes(item.type as HomeValidMediaType))
+      .map((item) => item.getAsFile()).filter(Boolean) as File[];
+    if (imageFiles.length > 0) { e.preventDefault(); addFiles(imageFiles); }
+  }, [addFiles]);
+
+  const meta = AGENT_META[type];
+  const canSubmit = !!prompt.trim() && hasProject;
+
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-5 p-8">
-      <div className="w-14 h-14 rounded-2xl flex items-center justify-center"
-        style={{ background: "#0e0e20", border: "1px solid #2a2a48" }}>
-        <Cpu size={26} style={{ color: "#5533ff" }} />
-      </div>
-      <div className="text-center max-w-xs">
-        <h2 className="text-base font-bold mb-1.5" style={{ color: "#c0c0e8" }}>
-          {hasProject ? "Ready to launch" : "Set a project first"}
-        </h2>
-        <p className="text-sm leading-relaxed" style={{ color: "#404068" }}>
-          {hasProject
-            ? "Spawn agents in parallel. Each one reads files, runs code, and works directly in your project."
-            : "Pick a project folder above, then launch agents that work inside it."}
-        </p>
-      </div>
-      {hasProject && (
-        <div className="grid grid-cols-3 gap-2">
-          {(Object.keys(AGENT_META) as AgentType[]).map((type) => {
-            const meta = AGENT_META[type];
+    <div className="flex flex-col items-center justify-center h-full p-6 overflow-y-auto"
+      onPaste={handlePaste}
+    >
+      <div className="w-full max-w-2xl space-y-3">
+        {/* Title */}
+        <div className="text-center mb-4">
+          <div className="flex items-center justify-center gap-2 mb-1.5">
+            <Cpu size={16} style={{ color: "#6644ff" }} />
+            <span className="font-bold text-sm" style={{ color: "#c0c0e8" }}>
+              {hasProject ? "What should an agent work on?" : "Set a project to get started"}
+            </span>
+          </div>
+          {!hasProject && (
+            <p className="text-xs" style={{ color: "#404068" }}>
+              Pick a project folder in the header, then type your task below.
+            </p>
+          )}
+        </div>
+
+        {/* Main input box */}
+        <div className="rounded-2xl overflow-hidden"
+          style={{ background: "#0e0e1a", border: `1px solid ${prompt ? "#3a3a6a" : "#1e1e35"}`, boxShadow: prompt ? "0 0 24px rgba(102,68,255,0.12)" : "none" }}
+        >
+          {/* Textarea */}
+          <textarea
+            ref={textareaRef}
+            value={prompt}
+            onChange={(e) => {
+              setPrompt(e.target.value);
+              e.target.style.height = "auto";
+              e.target.style.height = `${e.target.scrollHeight}px`;
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); handleSubmit(); }
+            }}
+            placeholder={hasProject ? "Describe what the agent should do… (⌘↵ to launch)" : "Set a project first…"}
+            disabled={!hasProject}
+            rows={4}
+            className="w-full px-5 pt-4 pb-3 text-sm resize-none outline-none"
+            style={{
+              background: "transparent",
+              color: "#c0c0e8",
+              caretColor: meta.color,
+              minHeight: "108px",
+              overflow: "hidden",
+              lineHeight: "1.6",
+            }}
+          />
+
+          {/* Image previews */}
+          {images.length > 0 && (
+            <div className="flex flex-wrap gap-2 px-4 pb-2">
+              {images.map((img, i) => (
+                <div key={i} className="relative group" style={{ width: 52, height: 52 }}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={img.previewUrl} alt={img.name} className="w-full h-full object-cover rounded-lg"
+                    style={{ border: "1px solid #2a2a48" }} />
+                  <button onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
+                    className="absolute -top-1 -right-1 w-4 h-4 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                    style={{ background: "#ff4466", color: "#fff" }}>
+                    <XIcon size={9} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Bottom toolbar */}
+          <div className="flex items-center gap-2 px-4 py-2.5" style={{ borderTop: "1px solid #1a1a2e" }}>
+            {/* Attach images */}
+            <button onClick={() => fileInputRef.current?.click()}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-colors"
+              style={{ background: "#13131f", border: "1px solid #1e1e35", color: "#50508a" }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#9090cc"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#50508a"; }}
+              title="Attach images (or Ctrl+V paste)"
+            >
+              <Paperclip size={11} />
+              {images.length > 0 ? `${images.length} image${images.length > 1 ? "s" : ""}` : "Image"}
+            </button>
+            <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple className="hidden"
+              onChange={(e) => e.target.files && addFiles(e.target.files)} />
+
+            <div className="flex-1" />
+
+            {/* History shortcut */}
+            <button onClick={onHistory}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-colors"
+              style={{ color: "#404060", border: "1px solid transparent" }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#7766bb"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#404060"; }}
+            >
+              <History size={11} />
+              History
+            </button>
+
+            {/* Submit */}
+            <button onClick={handleSubmit} disabled={!canSubmit}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
+              style={{
+                background: canSubmit ? meta.color : "#1e1e35",
+                color: canSubmit ? "#000" : "#404060",
+                cursor: canSubmit ? "pointer" : "not-allowed",
+              }}
+            >
+              <CornerDownLeft size={11} />
+              {meta.emoji} Launch {meta.label}
+            </button>
+          </div>
+        </div>
+
+        {/* Skills — always visible */}
+        <div className="rounded-xl px-3 pt-2.5 pb-2" style={{ background: "#0a0a14", border: "1px solid #15152a" }}>
+          <div className="flex items-center gap-1.5 mb-2">
+            <Zap size={10} style={{ color: "#6644ff" }} />
+            <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: "#404060" }}>Skills</span>
+            {skills.length > 0 && (
+              <span className="text-xs" style={{ color: "#30304a" }}>· click to insert into prompt</span>
+            )}
+          </div>
+          {skills.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {skills.map((skill) => (
+                <button key={`${skill.source}-${skill.slug}`} onClick={() => insertSkill(skill.slug)}
+                  title={`${skill.description}\n\nInserts: /${skill.slug}`}
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-all"
+                  style={{
+                    background: skill.source === "project" ? "#6644ff15" : "#12121e",
+                    border: `1px solid ${skill.source === "project" ? "#6644ff30" : "#1a1a2e"}`,
+                    color: skill.source === "project" ? "#8866ee" : "#555577",
+                  }}
+                  onMouseEnter={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.background = skill.source === "project" ? "#6644ff22" : "#1a1a2e";
+                    (e.currentTarget as HTMLButtonElement).style.color = skill.source === "project" ? "#aa88ff" : "#9090bb";
+                  }}
+                  onMouseLeave={(e) => {
+                    (e.currentTarget as HTMLButtonElement).style.background = skill.source === "project" ? "#6644ff15" : "#12121e";
+                    (e.currentTarget as HTMLButtonElement).style.color = skill.source === "project" ? "#8866ee" : "#555577";
+                  }}
+                >
+                  <span style={{ opacity: 0.5, fontSize: "9px" }}>/</span>
+                  {skill.name}
+                  {skill.source === "project" && (
+                    <span style={{ color: "#6644ff60", fontSize: "9px", marginLeft: 2 }}>proj</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs space-y-0.5" style={{ color: "#35355a" }}>
+              <p>No skills found. Add <code style={{ color: "#6644ff88" }}>.md</code> files to:</p>
+              {skillPaths?.projectSkills && (
+                <p><span style={{ color: "#2a2a50" }}>Project: </span>
+                  <code style={{ color: "#6644ff70", wordBreak: "break-all" }}>{skillPaths.projectSkills}/</code></p>
+              )}
+              {skillPaths?.projectCommands && (
+                <p><span style={{ color: "#2a2a50" }}>Project (commands): </span>
+                  <code style={{ color: "#6644ff70", wordBreak: "break-all" }}>{skillPaths.projectCommands}/</code></p>
+              )}
+              <p><span style={{ color: "#2a2a50" }}>Global: </span>
+                <code style={{ color: "#6644ff70" }}>{skillPaths?.global ?? "~/.claude/commands/"}</code></p>
+            </div>
+          )}
+        </div>
+
+        {/* Agent type pills */}
+        <div className="flex items-center gap-2 flex-wrap justify-center pt-1">
+          <span className="text-xs" style={{ color: "#25254a" }}>Type:</span>
+          {(Object.keys(AGENT_META) as AgentType[]).map((t) => {
+            const m = AGENT_META[t];
+            const sel = t === type;
             return (
-              <div key={type} className="flex flex-col items-center gap-1 p-2.5 rounded-xl"
-                style={{ background: "#0e0e1a", border: "1px solid #1e1e35" }}>
-                <span className="text-lg">{meta.emoji}</span>
-                <span className="text-xs font-medium" style={{ color: meta.color }}>{meta.label}</span>
-              </div>
+              <button key={t} onClick={() => setType(t)}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs transition-all"
+                style={{
+                  background: sel ? `${m.color}18` : "transparent",
+                  border: `1px solid ${sel ? m.color + "55" : "#18182e"}`,
+                  color: sel ? m.color : "#383858",
+                }}
+                onMouseEnter={(e) => { if (!sel) (e.currentTarget as HTMLButtonElement).style.color = "#555580"; }}
+                onMouseLeave={(e) => { if (!sel) (e.currentTarget as HTMLButtonElement).style.color = "#383858"; }}
+              >
+                <span>{m.emoji}</span>
+                {m.label}
+              </button>
             );
           })}
         </div>
-      )}
-      <div className="flex gap-2">
-        <button onClick={onNew} disabled={!hasProject}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl font-semibold text-sm"
-          style={{
-            background: hasProject ? "linear-gradient(135deg, #5533ff, #8844ff)" : "#13131f",
-            color: hasProject ? "#fff" : "#404060",
-            boxShadow: hasProject ? "0 0 18px rgba(85,51,255,0.4)" : "none",
-            border: hasProject ? "none" : "1px solid #1e1e35",
-            cursor: hasProject ? "pointer" : "not-allowed",
-          }}>
-          <Plus size={14} />
-          New Agent
-        </button>
-        <button onClick={onHistory}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm transition-colors"
-          style={{ background: "#0e0e1a", border: "1px solid #1e1e35", color: "#606080" }}
-          onMouseEnter={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.color = "#9977ff";
-            (e.currentTarget as HTMLButtonElement).style.borderColor = "#6644ff40";
-          }}
-          onMouseLeave={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.color = "#606080";
-            (e.currentTarget as HTMLButtonElement).style.borderColor = "#1e1e35";
-          }}>
-          <History size={14} />
-          View History
-        </button>
       </div>
     </div>
   );

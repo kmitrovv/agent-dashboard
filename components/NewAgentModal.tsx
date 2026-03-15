@@ -75,6 +75,7 @@ export function NewAgentModal({ onSubmit, onClose, hasProject = false, project =
   const [type, setType] = useState<AgentType>("thinker");
   const [prompt, setPrompt] = useState("");
   const [skills, setSkills] = useState<SkillEntry[]>([]);
+  const [skillsProjectDir, setSkillsProjectDir] = useState<string | null>(null);
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -91,7 +92,7 @@ export function NewAgentModal({ onSubmit, onClose, hasProject = false, project =
     const url = project ? `/api/skills?cwd=${encodeURIComponent(project)}` : "/api/skills";
     fetch(url)
       .then((r) => r.json())
-      .then((d) => setSkills(d.skills ?? []))
+      .then((d) => { setSkills(d.skills ?? []); setSkillsProjectDir(d.paths?.projectSkills ?? d.paths?.projectCommands ?? null); })
       .catch(() => {});
   }, [project]);
 
@@ -200,17 +201,24 @@ export function NewAgentModal({ onSubmit, onClose, hasProject = false, project =
             <textarea
               ref={textareaRef}
               value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
+              onChange={(e) => {
+                setPrompt(e.target.value);
+                // Auto-grow
+                e.target.style.height = "auto";
+                e.target.style.height = `${e.target.scrollHeight}px`;
+              }}
               onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSubmit(); }}
               onPaste={handlePaste}
               placeholder="What should this agent work on? (paste images here)"
-              rows={3}
+              rows={4}
               className="w-full rounded-lg px-3 py-2.5 text-sm resize-none outline-none transition-colors"
               style={{
                 background: "#08080f",
                 border: `1px solid ${prompt ? meta.color + "50" : "#1e1e35"}`,
                 color: "#c0c0e8",
                 caretColor: meta.color,
+                minHeight: "96px",
+                overflow: "hidden",
               }}
             />
 
@@ -307,11 +315,21 @@ export function NewAgentModal({ onSubmit, onClose, hasProject = false, project =
                 ))}
               </div>
             ) : (
-              <p className="text-xs leading-relaxed" style={{ color: "#40406a" }}>
-                No skills found. Add <code style={{ color: "#6644ffaa" }}>.md</code> files to{" "}
-                <code style={{ color: "#6644ffaa" }}>~/.claude/commands/</code> (global) or{" "}
-                <code style={{ color: "#6644ffaa" }}>.claude/commands/</code> in your project.
-              </p>
+              <div className="text-xs leading-relaxed space-y-1" style={{ color: "#40406a" }}>
+                <p>
+                  No skills found. Add <code style={{ color: "#6644ffaa" }}>.md</code> files to either:
+                </p>
+                <p>
+                  <span style={{ color: "#35355a" }}>Global: </span>
+                  <code style={{ color: "#6644ff88" }}>~/.claude/commands/</code>
+                </p>
+                {skillsProjectDir && (
+                  <p>
+                    <span style={{ color: "#35355a" }}>Project: </span>
+                    <code style={{ color: "#6644ff88", wordBreak: "break-all" }}>{skillsProjectDir}</code>
+                  </p>
+                )}
+              </div>
             )}
           </div>
 
